@@ -1,8 +1,8 @@
 # Infrastructure Automation
 
-Automation scripts and configuration for managing personal server infrastructure.
+Automation scripts and configuration for managing my personal server infrastructure.
 
-## Servers Managed
+## Servers Managed (for now)
 
 - Pi-hole DNS server (Raspberry Pi)
 - Web server running nginx (DigitalOcean VM)
@@ -21,22 +21,18 @@ Automation scripts and configuration for managing personal server infrastructure
 - SSH access to all servers
 - pre-commit (optional but recommended)
 
-Install Ansible via mise if you can
+Install Ansible:
 
 ```bash
 mise use ansible@latest
-```
-
-or pip if you have to:
-
-```bash
+# or pip if you have to:
 pip install ansible
 ```
 
 Install pre-commit for git hooks:
 
 ```bash
-pip install pre-commit
+mise use pre-commit@latest
 # or
 brew install pre-commit
 ```
@@ -66,23 +62,16 @@ Edit `inventory/hosts` with your actual IPs and usernames. This file is gitignor
 
 #### 2. Set Up Ansible Vault
 
-Create a vault password file (gitignored) in the repo root:
+Get the vault password stored in 1password, and put it into the (.gitignore'd) `.vault_pass` file in the repo root.
 
 ```bash
-echo "your-strong-vault-password" > .vault_pass
+echo "my-strong-vault-password" > .vault_pass
 chmod 600 .vault_pass
 ```
 
 #### 3. Create and Encrypt Secrets
 
-Copy the vault example:
-
-```bash
-cd ansible
-cp inventory/group_vars/all/vault.yml.example inventory/group_vars/all/vault.yml
-```
-
-Edit `vault.yml` with your actual secrets, then encrypt it:
+Edit `vault.yml` with secrets, then encrypt it:
 
 ```bash
 ansible-vault encrypt inventory/group_vars/all/vault.yml
@@ -95,8 +84,6 @@ ansible-vault edit inventory/group_vars/all/vault.yml
 ```
 
 #### 4. Configure Variables
-
-Edit the following files to match your setup:
 
 - `ansible/inventory/group_vars/all/vars.yml` - Common settings
 - `ansible/inventory/group_vars/pihole/vars.yml` - Pi-hole settings
