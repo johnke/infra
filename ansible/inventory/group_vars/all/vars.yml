@@ -1,0 +1,15 @@
+# Non-sensitive variables for all hosts
+# Put sensitive variables in vault.yml
+
+# General settings
+timezone: America/New_York
+ntp_servers:
+  - time.cloudflare.com
+  - time.google.com
+
+# Security
+ssh_port: 22
+ufw_enabled: true
+
+# Monitoring (example)
+enable_monitoring: true

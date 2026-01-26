@@ -1,0 +1,24 @@
+repos:
+  # Check that vault files are encrypted
+  - repo: local
+    hooks:
+      - id: check-ansible-vault-encrypted
+        name: Check Ansible vault files are encrypted
+        entry: bash -c 'for file in "$@"; do if ! head -n1 "$file" | grep -q "^\$ANSIBLE_VAULT"; then echo "ERROR - Unencrypted vault file detected - $file - Run - cd ansible && ansible-vault encrypt $file"; exit 1; fi; done' --
+        language: system
+        files: vault\.ya?ml$
+        pass_filenames: true
+
+  # General file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        exclude: vault\.ya?ml$  # Skip vault files (encrypted, not valid YAML)
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: detect-private-key
+        exclude: ^\.vault_pass$

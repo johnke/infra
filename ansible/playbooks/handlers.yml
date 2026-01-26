@@ -1,0 +1,30 @@
+---
+# Handlers for all playbooks
+
+- name: reload nginx
+  ansible.builtin.service:
+    name: nginx
+    state: reloaded
+
+- name: restart nginx
+  ansible.builtin.service:
+    name: nginx
+    state: restarted
+
+- name: restart pihole-FTL
+  ansible.builtin.service:
+    name: pihole-FTL
+    state: restarted
+
+- name: restart supervisor
+  ansible.builtin.service:
+    name: supervisor
+    state: restarted
+
+- name: reread supervisor
+  ansible.builtin.command:
+    cmd: supervisorctl reread
+
+- name: update supervisor
+  ansible.builtin.command:
+    cmd: supervisorctl update

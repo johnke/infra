@@ -1,0 +1,12 @@
+# Pi-hole specific variables
+
+pihole_version: latest
+pihole_web_password: "{{ vault_pihole_password }}"
+
+# DNS settings
+pihole_dns_1: 1.1.1.1
+pihole_dns_2: 1.0.0.1
+
+# Blocklists (examples)
+pihole_blocklists:
+  - https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts

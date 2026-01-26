@@ -1,0 +1,46 @@
+---
+# Pi-hole configuration
+
+- name: Allow DNS through UFW
+  community.general.ufw:
+    rule: allow
+    port: "53"
+    proto: "{{ item }}"
+  loop:
+    - tcp
+    - udp
+
+- name: Allow HTTP for Pi-hole web interface
+  community.general.ufw:
+    rule: allow
+    port: "80"
+    proto: tcp
+
+- name: Check if Pi-hole is installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/pihole
+  register: pihole_installed
+
+- name: Download Pi-hole installer
+  ansible.builtin.get_url:
+    url: https://install.pi-hole.net
+    dest: /tmp/pihole-install.sh
+    mode: '0755'
+  when: not pihole_installed.stat.exists
+
+- name: Install Pi-hole
+  ansible.builtin.command:
+    cmd: bash /tmp/pihole-install.sh --unattended
+  when: not pihole_installed.stat.exists
+
+# - name: Set Pi-hole web password
+#   ansible.builtin.command:
+#     cmd: "pihole -a -p {{ pihole_web_password }}"
+#   changed_when: true
+#   no_log: true
+
+- name: Ensure Pi-hole is enabled
+  ansible.builtin.service:
+    name: pihole-FTL
+    state: started
+    enabled: yes

@@ -1,0 +1,35 @@
+# Ansible
+*.retry
+*.log
+
+# Secrets - NEVER commit these files
+# Note: Encrypted vault.yml files SHOULD be committed
+# Only the .vault_pass password file should be gitignored (see below)
+ansible/inventory/hosts
+ansible/inventory/production
+secrets/
+
+# SSH keys
+*.pem
+*.key
+id_rsa*
+
+# Environment files
+.env
+.env.*
+
+# Vault password files
+.vault_pass
+.vault_password
+vault_pass.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

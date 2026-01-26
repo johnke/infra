@@ -1,0 +1,26 @@
+---
+# Main playbook to configure all servers
+
+- name: Configure all servers
+  hosts: all
+  handlers:
+    - ansible.builtin.import_tasks: handlers.yml
+  tasks:
+    - name: Include common setup
+      ansible.builtin.include_tasks: common.yml
+
+- name: Configure Pi-hole
+  hosts: pihole
+  handlers:
+    - ansible.builtin.import_tasks: handlers.yml
+  tasks:
+    - name: Include Pi-hole setup
+      ansible.builtin.include_tasks: pihole.yml
+
+- name: Configure web servers
+  hosts: webservers
+  handlers:
+    - ansible.builtin.import_tasks: handlers.yml
+  tasks:
+    - name: Include web server setup
+      ansible.builtin.include_tasks: webserver.yml

@@ -1,0 +1,111 @@
+---
+# Web server configuration
+
+- name: Install nginx, certbot, and supervisor
+  ansible.builtin.apt:
+    name:
+      - nginx
+      - certbot
+      - python3-certbot-nginx
+      - supervisor
+    state: present
+
+- name: Allow HTTP through UFW
+  community.general.ufw:
+    rule: allow
+    port: "80"
+    proto: tcp
+
+- name: Allow HTTPS through UFW
+  community.general.ufw:
+    rule: allow
+    port: "443"
+    proto: tcp
+
+- name: Ensure SSL dhparam file exists
+  ansible.builtin.command:
+    cmd: openssl dhparam -out /etc/ssl/certs/dhparam.pem 2048
+    creates: /etc/ssl/certs/dhparam.pem
+  when: nginx_sites | selectattr('ssl_enabled', 'defined') | selectattr('ssl_enabled') | list | length > 0
+
+- name: Create web root directories
+  ansible.builtin.file:
+    path: "{{ item.root }}"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: '0755'
+  loop: "{{ nginx_sites }}"
+  when: nginx_sites is defined and nginx_sites | length > 0
+
+- name: Deploy static nginx site configurations
+  ansible.builtin.template:
+    src: nginx-site.conf.j2
+    dest: "/etc/nginx/sites-available/{{ item.name }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ nginx_sites }}"
+  notify: reload nginx
+  when: nginx_sites is defined and nginx_sites | length > 0 and (item.site_type | default('static')) == 'static'
+
+- name: Deploy Django nginx site configurations
+  ansible.builtin.template:
+    src: nginx-django-site.conf.j2
+    dest: "/etc/nginx/sites-available/{{ item.name }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ nginx_sites }}"
+  notify: reload nginx
+  when: nginx_sites is defined and nginx_sites | length > 0 and item.site_type is defined and item.site_type == 'django'
+
+- name: Enable nginx sites
+  ansible.builtin.file:
+    src: "/etc/nginx/sites-available/{{ item.name }}"
+    dest: "/etc/nginx/sites-enabled/{{ item.name }}"
+    state: link
+  loop: "{{ nginx_sites }}"
+  notify: reload nginx
+  when: nginx_sites is defined and nginx_sites | length > 0
+
+- name: Ensure nginx is started and enabled
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: yes
+
+- name: Set up certbot renewal timer
+  ansible.builtin.systemd:
+    name: certbot.timer
+    enabled: yes
+    state: started
+
+# Django-specific tasks
+- name: Create Django app log directories
+  ansible.builtin.file:
+    path: "{{ item.root }}/logs"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: '0755'
+  loop: "{{ nginx_sites }}"
+  when: nginx_sites is defined and item.site_type is defined and item.site_type == 'django'
+
+- name: Deploy supervisor configurations for Django apps
+  ansible.builtin.template:
+    src: supervisor-django.conf.j2
+    dest: "/etc/supervisor/conf.d/{{ item.name }}.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ nginx_sites }}"
+  notify: restart supervisor
+  when: nginx_sites is defined and item.site_type is defined and item.site_type == 'django'
+
+- name: Ensure supervisor is started and enabled
+  ansible.builtin.service:
+    name: supervisor
+    state: started
+    enabled: yes
+  when: nginx_sites | selectattr('site_type', 'defined') | selectattr('site_type', 'equalto', 'django') | list | length > 0
