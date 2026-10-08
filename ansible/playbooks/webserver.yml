@@ -1,14 +1,50 @@
 ---
 # Web server configuration
 
-- name: Install nginx, certbot, and supervisor
+- name: Install nginx, certbot, supervisor, and Docker dependencies
   ansible.builtin.apt:
     name:
       - nginx
       - certbot
       - python3-certbot-nginx
       - supervisor
+      - ca-certificates
+      - curl
+      - gnupg
     state: present
+    update_cache: yes
+
+- name: Add Docker GPG key
+  ansible.builtin.apt_key:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    state: present
+
+- name: Add Docker repository
+  ansible.builtin.apt_repository:
+    repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+    state: present
+
+- name: Install Docker
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-compose-plugin
+    state: present
+    update_cache: yes
+
+- name: Ensure Docker service is started and enabled
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: yes
+
+- name: Add user to docker group
+  ansible.builtin.user:
+    name: "{{ ansible_user }}"
+    groups: docker
+    append: yes
 
 - name: Allow HTTP through UFW
   community.general.ufw:
@@ -34,7 +70,7 @@
     state: directory
     owner: www-data
     group: www-data
-    mode: '0755'
+    mode: '0775'  # Group writable for deployments
   loop: "{{ nginx_sites }}"
   when: nginx_sites is defined and nginx_sites | length > 0
 
@@ -59,6 +95,17 @@
   loop: "{{ nginx_sites }}"
   notify: reload nginx
   when: nginx_sites is defined and nginx_sites | length > 0 and item.site_type is defined and item.site_type == 'django'
+
+- name: Deploy Docker nginx site configurations
+  ansible.builtin.template:
+    src: nginx-docker-site.conf.j2
+    dest: "/etc/nginx/sites-available/{{ item.name }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ nginx_sites }}"
+  notify: reload nginx
+  when: nginx_sites is defined and nginx_sites | length > 0 and item.site_type is defined and item.site_type == 'docker'
 
 - name: Enable nginx sites
   ansible.builtin.file:
@@ -88,7 +135,7 @@
     state: directory
     owner: www-data
     group: www-data
-    mode: '0755'
+    mode: '0775'  # Group writable for deployments
   loop: "{{ nginx_sites }}"
   when: nginx_sites is defined and item.site_type is defined and item.site_type == 'django'
 
@@ -109,3 +156,51 @@
     state: started
     enabled: yes
   when: nginx_sites | selectattr('site_type', 'defined') | selectattr('site_type', 'equalto', 'django') | list | length > 0
+
+# Docker-specific tasks
+- name: Create Docker app directories
+  ansible.builtin.file:
+    path: "{{ item.docker_compose_dir }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+  loop: "{{ nginx_sites }}"
+  when: nginx_sites is defined and item.site_type is defined and item.site_type == 'docker' and item.docker_compose_dir is defined
+
+- name: Deploy Docker Compose files from templates
+  ansible.builtin.template:
+    src: "{{ item.docker_compose_template }}"
+    dest: "{{ item.docker_compose_dir }}/docker-compose.yml"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0644'
+  loop: "{{ nginx_sites }}"
+  when: nginx_sites is defined and item.site_type is defined and item.site_type == 'docker' and item.docker_compose_template is defined
+
+- name: Deploy Docker Compose files from static files
+  ansible.builtin.copy:
+    src: "{{ item.docker_compose_file }}"
+    dest: "{{ item.docker_compose_dir }}/docker-compose.yml"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0644'
+  loop: "{{ nginx_sites }}"
+  when: nginx_sites is defined and item.site_type is defined and item.site_type == 'docker' and item.docker_compose_file is defined
+
+- name: Deploy .env files for Docker apps
+  ansible.builtin.template:
+    src: "{{ item.docker_env_template }}"
+    dest: "{{ item.docker_compose_dir }}/.env"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0600'
+  loop: "{{ nginx_sites }}"
+  when: nginx_sites is defined and item.site_type is defined and item.site_type == 'docker' and item.docker_env_template is defined
+
+- name: Start Docker Compose services
+  community.docker.docker_compose_v2:
+    project_src: "{{ item.docker_compose_dir }}"
+    state: present
+  loop: "{{ nginx_sites }}"
+  when: nginx_sites is defined and item.site_type is defined and item.site_type == 'docker' and item.docker_compose_dir is defined and (item.docker_compose_template is defined or item.docker_compose_file is defined)

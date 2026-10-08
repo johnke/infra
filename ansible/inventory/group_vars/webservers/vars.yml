@@ -4,6 +4,10 @@
 certbot_email: "{{ vault_certbot_email }}"
 certbot_create_if_missing: false  # Set to true to automatically request new certs
 
+# Base directories
+web_root_base: /var/www
+docker_apps_base: /opt/docker
+
 # Nginx sites configuration
 # Each site will create a config in sites-available and symlink to sites-enabled
 nginx_sites:
@@ -13,7 +17,7 @@ nginx_sites:
       - www.johnke.me
       - johnke.wtf
       - www.johnke.wtf
-    root: /var/www/johnke.me
+    root: "{{ web_root_base }}/johnke.me"
     ssl_enabled: true
     ssl_certificate: /etc/letsencrypt/live/johnke.me-0001/fullchain.pem
     ssl_certificate_key: /etc/letsencrypt/live/johnke.me-0001/privkey.pem
@@ -25,7 +29,7 @@ nginx_sites:
     server_names:
       - kathleenkelleher.com
       - www.kathleenkelleher.com
-    root: /var/www/kathleenkelleher.com/kathleenkelleher.com
+    root: "{{ web_root_base }}/kathleenkelleher.com/kathleenkelleher.com"
     ssl_enabled: false
 
   # Django site with Gunicorn + Supervisor
@@ -34,7 +38,7 @@ nginx_sites:
     server_names:
       - goty.club
       - www.goty.club
-    root: /var/www/goty.club
+    root: "{{ web_root_base }}/goty.club"
     ssl_enabled: true
     use_certbot_ssl_config: true  # Use Certbot's SSL config instead of custom
     ssl_certificate: /etc/letsencrypt/live/goty.club/fullchain.pem
@@ -44,3 +48,18 @@ nginx_sites:
     client_max_body_size: 10M
     # supervisor_environment:
     #   DJANGO_SETTINGS_MODULE: config.settings.production
+
+  # Docker application with reverse proxy
+  - name: bookmarks.johnke.me
+    site_type: docker
+    server_names:
+      - bookmarks.johnke.me
+    ssl_enabled: true
+    ssl_certificate: /etc/letsencrypt/live/johnke.me-0001/fullchain.pem
+    ssl_certificate_key: /etc/letsencrypt/live/johnke.me-0001/privkey.pem
+    proxy_port: 9090  # Port Docker container listens on
+    client_max_body_size: 50M
+    # Docker Compose configuration
+    docker_compose_dir: "{{ docker_apps_base }}/bookmarks"
+    # docker_compose_template: bookmarks-compose.yml.j2  # Optional: use template instead of static file
+    # docker_compose_file: bookmarks-compose.yml  # Optional: deploy from files/ directory
