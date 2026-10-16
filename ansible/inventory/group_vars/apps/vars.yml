@@ -1,0 +1,41 @@
+# Application host (Raspberry Pi 5, home network behind CGNAT)
+#
+# Runs Docker apps that are published to the internet by caesar over the
+# WireGuard tunnel. Nothing here is reachable from outside the LAN directly.
+#
+# DISABLED 2026-10-08
+# ===================
+# This whole path is parked until we revisit self-hosting linkding. Nothing
+# here runs while the flags below are false, and the host is commented out of
+# inventory/hosts, so the apps group is empty.
+#
+# To bring it back:
+#   1. Uncomment pi-apps in inventory/hosts
+#   2. Set apps_enabled and linkding_enabled to true here
+#   3. Set wg_enabled: true in group_vars/webservers/vars.yml
+#   4. Uncomment the bookmarks.johnke.me site in group_vars/webservers/vars.yml
+#   5. Add 51820/udp back to pf_allowed_udp_ports there
+#   6. Add the vault_wg_* and vault_linkding_* secrets to the vault
+# See CLAUDE.md "The WireGuard tunnel" for the design and its trade-offs.
+
+# Master switch for this host. False means apps.yml does nothing.
+apps_enabled: false
+
+# Docker apps live here
+docker_apps_base: /opt/docker
+
+# --- linkding ----------------------------------------------------------------
+linkding_enabled: false
+linkding_compose_dir: "{{ docker_apps_base }}/linkding"
+linkding_data_dir: "{{ docker_apps_base }}/linkding/data"
+linkding_image: sissbruecker/linkding:latest
+# Bound to the tunnel address only -- never 0.0.0.0, so the app is not exposed
+# on the LAN or to the internet except through caesar's nginx.
+linkding_port: 9090
+linkding_url_base: "https://bookmarks.johnke.me"
+linkding_superuser_name: johnke
+linkding_superuser_password: "{{ vault_linkding_superuser_password }}"
+
+# This Pi does not run a firewall of its own (it is LAN-only and the apps bind
+# to the tunnel/loopback), so ufw is left off here.
+ufw_enabled: false

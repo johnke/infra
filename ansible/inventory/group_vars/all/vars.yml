@@ -2,14 +2,56 @@
 # Put sensitive variables in vault.yml
 
 # General settings
-timezone: America/New_York
+timezone: Europe/Amsterdam
 ntp_servers:
   - time.cloudflare.com
-  - time.google.com
+  - pool.ntp.org
 
 # Security
 ssh_port: 22
+# Firewall: ufw on Debian hosts, pf on OpenBSD hosts
 ufw_enabled: true
+pf_enabled: true
+pf_allow_ipv6: true
+# Extra inbound TCP/UDP ports opened by pf. SSH is handled by its own
+# rate-limited rule, so do not list ssh_port here.
+pf_allowed_tcp_ports: []
+pf_allowed_udp_ports: []
+
+# WireGuard tunnel: caesar (hub, public) <-> pi-apps (home, behind CGNAT)
+# The Pi always dials out, so CGNAT never has to accept an inbound connection.
+#
+# DISABLED 2026-10-08: off by default; the settings below are kept so the path
+# can be re-enabled without reconstructing them. Flip wg_enabled in
+# group_vars/webservers/vars.yml (and apps_enabled in group_vars/apps/vars.yml)
+# to turn it back on.
+wg_enabled: false
+wg_interface: wg0
+wg_port: 51820
+wg_subnet: 10.99.0.0/24
+wg_caesar_ip: 10.99.0.1
+wg_pi_apps_ip: 10.99.0.2
+# WireGuard adds ~60 bytes of overhead; 1420 avoids fragmentation/hangs on
+# large responses over a 1500-byte path.
+wg_mtu: 1420
+# Public endpoint the Pi dials. Keep as the hostname so a server move only
+# needs a DNS change.
+wg_endpoint_host: caesar.johnke.me
+
+# OpenBSD package names.
+# pkg_add runs non-interactively under Ansible (-I), so it cannot prompt to
+# resolve an ambiguous stem -- ambiguous names must be pinned here using the
+# `stem--flavor` syntax.
+#
+# Note the Python port's stem is "python", NOT "python3" (there is no python3
+# package). OpenBSD 7.9 ships 3.13.x. The bare stem is unambiguous, so no
+# flavor/branch suffix is needed.
+openbsd_python_pkg: "python"
+openbsd_vim_pkg: "vim-9.2.1125"
+# rsync is not in OpenBSD base; CI rsyncs site content in over SSH.
+# If pkg_add reports an ambiguity, pin the exact version as with vim above
+# (`pkg_info -Q rsync` lists the candidates).
+openbsd_rsync_pkg: "rsync"
 
 # Monitoring (example)
 enable_monitoring: true

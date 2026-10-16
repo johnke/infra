@@ -1,0 +1,108 @@
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Reverse proxy to an upstream application
+{#- Serve HTTPS only once the certificate exists: nginx refuses to start if
+    a configured certificate file is missing, which would otherwise wedge the
+    whole server until the certificate is installed. -#}
+{% set has_cert = item.name in (sites_with_certs | default([item.name])) %}
+{% if item.ssl_enabled and has_cert %}
+
+
+# HTTPS server block
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name {{ item.server_names | join(' ') }};
+
+    # SSL configuration (shared settings live in nginx.conf)
+    ssl_certificate {{ item.ssl_certificate }};
+    ssl_certificate_key {{ item.ssl_certificate_key }};
+
+    add_header Strict-Transport-Security "max-age=63072000" always;
+    add_header X-Content-Type-Options nosniff;
+
+    # Logging (real paths: nginx opens logs before chrooting)
+    access_log {{ nginx_log_dir }}/{{ item.name }}-access.log main;
+    error_log {{ nginx_log_dir }}/{{ item.name }}-error.log;
+
+    # Client upload size
+    client_max_body_size {{ item.client_max_body_size | default('10M') }};
+
+    location / {
+        proxy_pass http://{{ item.proxy_host | default('127.0.0.1') }}:{{ item.proxy_port }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket support
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        proxy_connect_timeout {{ item.proxy_connect_timeout | default('10s') }};
+        proxy_send_timeout {{ item.proxy_send_timeout | default('60s') }};
+        proxy_read_timeout {{ item.proxy_read_timeout | default('60s') }};
+{% if item.proxy_custom_error_page | default(false) %}
+
+        # The upstream lives at the far end of a tunnel to a home connection;
+        # fail legibly rather than showing nginx's default gateway error.
+        proxy_intercept_errors on;
+        error_page 502 503 504 /__upstream_down.html;
+{% endif %}
+    }
+{% if item.proxy_custom_error_page | default(false) %}
+
+    location = /__upstream_down.html {
+        internal;
+        default_type text/html;
+        return 503 '<!doctype html><meta charset=utf-8><title>Temporarily unavailable</title><style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:20vh auto;padding:0 1rem;line-height:1.5}</style><h1>Temporarily unavailable</h1><p>{{ item.name }} is not reachable right now. It is hosted at the far end of a home connection, which is probably offline. Try again shortly.</p>';
+    }
+{% endif %}
+{% if item.custom_config is defined %}
+    # Custom configuration
+{{ item.custom_config | trim | indent(4, first=True) }}
+{% endif %}
+}
+
+# HTTP to HTTPS redirect
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ item.server_names | join(' ') }};
+
+    return 301 https://$host$request_uri;
+}
+{% else %}
+
+# HTTP only server block
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ item.server_names | join(' ') }};
+
+    # Logging (real paths: nginx opens logs before chrooting)
+    access_log {{ nginx_log_dir }}/{{ item.name }}-access.log main;
+    error_log {{ nginx_log_dir }}/{{ item.name }}-error.log;
+
+    client_max_body_size {{ item.client_max_body_size | default('10M') }};
+
+
+    location / {
+        proxy_pass http://{{ item.proxy_host | default('127.0.0.1') }}:{{ item.proxy_port }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+
+{% if item.custom_config is defined %}
+    # Custom configuration
+{{ item.custom_config | trim | indent(4, first=True) }}
+{% endif %}
+}
+{% endif %}

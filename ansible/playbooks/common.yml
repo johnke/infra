@@ -1,21 +1,20 @@
 ---
 # Common configuration for all servers
+# Runs against both Debian (pihole) and OpenBSD (webservers) hosts.
+
+# --- Debian / Ubuntu ---------------------------------------------------------
 
 - name: Update apt cache
   ansible.builtin.apt:
-    update_cache: yes
+    update_cache: true
     cache_valid_time: 3600
   when: ansible_facts["os_family"] == "Debian"
 
 - name: Upgrade all packages
   ansible.builtin.apt:
     upgrade: dist
-    autoremove: yes
+    autoremove: true
   when: ansible_facts["os_family"] == "Debian"
-
-- name: Set timezone
-  community.general.timezone:
-    name: "{{ timezone }}"
 
 - name: Install common packages
   ansible.builtin.apt:
@@ -27,6 +26,60 @@
       - htop
       - ufw
     state: present
+  when: ansible_facts["os_family"] == "Debian"
+
+- name: Set timezone
+  community.general.timezone:
+    name: "{{ timezone }}"
+  when: ansible_facts["os_family"] == "Debian"
+
+# --- OpenBSD -----------------------------------------------------------------
+
+- name: Install common packages
+  community.general.openbsd_pkg:
+    name:
+      - "{{ openbsd_vim_pkg }}"
+      - git
+      - curl
+      - wget
+    state: present
+  when: ansible_facts["os_family"] == "OpenBSD"
+
+- name: Set timezone
+  ansible.builtin.file:
+    src: "/usr/share/zoneinfo/{{ timezone }}"
+    dest: /etc/localtime
+    state: link
+    force: true
+  when: ansible_facts["os_family"] == "OpenBSD"
+
+- name: Configure ntpd servers
+  ansible.builtin.copy:
+    content: |
+      # Managed by Ansible - DO NOT EDIT MANUALLY
+      {% for server in ntp_servers %}
+      servers {{ server }}
+      {% endfor %}
+      sensor *
+
+      constraint from "9.9.9.9"              # quad9 v4 without DNS
+      constraint from "2620:fe::fe"          # quad9 v6 without DNS
+      constraints from "www.google.com"      # intentionally not 8.8.8.8
+    dest: /etc/ntpd.conf
+    owner: root
+    group: wheel
+    mode: '0644'
+  notify: restart ntpd
+  when: ansible_facts["os_family"] == "OpenBSD"
+
+- name: Ensure ntpd is enabled and running
+  ansible.builtin.service:
+    name: ntpd
+    state: started
+    enabled: true
+  when: ansible_facts["os_family"] == "OpenBSD"
+
+# --- Firewall: ufw (Debian) --------------------------------------------------
 
 - name: Configure UFW defaults
   community.general.ufw:
@@ -35,16 +88,57 @@
   loop:
     - { direction: 'incoming', policy: 'deny' }
     - { direction: 'outgoing', policy: 'allow' }
-  when: ufw_enabled
+  when: ufw_enabled and ansible_facts["os_family"] == "Debian"
 
 - name: Allow SSH through UFW
   community.general.ufw:
     rule: allow
     port: "{{ ssh_port }}"
     proto: tcp
-  when: ufw_enabled
+  when: ufw_enabled and ansible_facts["os_family"] == "Debian"
 
 - name: Enable UFW
   community.general.ufw:
     state: enabled
-  when: ufw_enabled
+  when: ufw_enabled and ansible_facts["os_family"] == "Debian"
+
+# --- Firewall: pf (OpenBSD) --------------------------------------------------
+# pf is configured as a single ruleset rather than rule-at-a-time; per-service
+# ports come from pf_allowed_tcp_ports, which group/host vars extend.
+
+# pf reads the <cloudflare> table from a file at ruleset-load time, so the file
+# must exist before the ruleset is validated. The refresh script lives in
+# webserver.yml (it also drives nginx), but an empty placeholder here is enough
+# for pf to load on a fresh host; the script fills it in with real data.
+- name: Ensure the Cloudflare table file exists before pf loads
+  ansible.builtin.copy:
+    content: ""
+    dest: "{{ cloudflare_ip_file }}"
+    owner: root
+    group: wheel
+    mode: '0644'
+    force: false  # never clobber real data on subsequent runs
+  when:
+    - ansible_facts["os_family"] == "OpenBSD"
+    - cloudflare_only_web | default(false)
+
+- name: Deploy pf ruleset
+  ansible.builtin.template:
+    src: pf.conf.j2
+    dest: /etc/pf.conf
+    owner: root
+    group: wheel
+    mode: '0600'
+    validate: 'pfctl -nf %s'
+  notify: reload pf
+  when: pf_enabled | default(true) and ansible_facts["os_family"] == "OpenBSD"
+
+- name: Ensure pf is enabled
+  ansible.builtin.command:
+    cmd: pfctl -e
+  register: pf_enable
+  changed_when: "'pf enabled' in pf_enable.stderr"
+  failed_when:
+    - pf_enable.rc != 0
+    - "'already enabled' not in pf_enable.stderr"
+  when: pf_enabled | default(true) and ansible_facts["os_family"] == "OpenBSD"

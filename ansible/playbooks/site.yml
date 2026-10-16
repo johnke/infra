@@ -17,6 +17,14 @@
     - name: Include Pi-hole setup
       ansible.builtin.include_tasks: pihole.yml
 
+- name: Configure application hosts
+  hosts: apps
+  handlers:
+    - ansible.builtin.import_tasks: handlers.yml
+  tasks:
+    - name: Include application host setup
+      ansible.builtin.include_tasks: apps.yml
+
 - name: Configure web servers
   hosts: webservers
   handlers:

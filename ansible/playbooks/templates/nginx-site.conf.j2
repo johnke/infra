@@ -1,30 +1,33 @@
 # Managed by Ansible - DO NOT EDIT MANUALLY
-{% if item.ssl_enabled %}
+# Static site
+{#- nginx on OpenBSD is chrooted to /var/www, so strip that prefix from
+    paths used inside the config. -#}
+{% set chroot_root = item.root | regex_replace('^' ~ chroot_base, '') %}
+{#- Serve HTTPS only once the certificate exists: nginx refuses to start if
+    a configured certificate file is missing, which would otherwise wedge the
+    whole server until the certificate is installed. -#}
+{% set has_cert = item.name in (sites_with_certs | default([item.name])) %}
+{% if item.ssl_enabled and has_cert %}
+
 # HTTPS server block
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
     server_name {{ item.server_names | join(' ') }};
 
-    # SSL configuration
+    # SSL configuration (shared settings live in nginx.conf)
     ssl_certificate {{ item.ssl_certificate }};
     ssl_certificate_key {{ item.ssl_certificate_key }};
 
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
-    ssl_dhparam /etc/ssl/certs/dhparam.pem;
-    ssl_ciphers 'ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-DSS-AES128-GCM-SHA256:kEDH+AESGCM:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-AES256-SHA:DHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA:DHE-DSS-AES128-SHA256:DHE-RSA-AES256-SHA256:DHE-DSS-AES256-SHA:DHE-RSA-AES256-SHA:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA256:AES256-SHA256:AES128-SHA:AES256-SHA:AES:CAMELLIA:DES-CBC3-SHA:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!aECDH:!EDH-DSS-DES-CBC3-SHA:!EDH-RSA-DES-CBC3-SHA:!KRB5-DES-CBC3-SHA';
-    ssl_session_timeout 1d;
-    ssl_session_cache shared:SSL:50m;
-    ssl_stapling on;
-    ssl_stapling_verify on;
+    add_header Strict-Transport-Security "max-age=63072000" always;
 
-    # Logging
-    access_log /var/log/nginx/{{ item.name }}-access.log;
-    error_log /var/log/nginx/{{ item.name }}-error.log;
+    # Logging (real paths: nginx opens logs before chrooting)
+    access_log {{ nginx_log_dir }}/{{ item.name }}-access.log main;
+    error_log {{ nginx_log_dir }}/{{ item.name }}-error.log;
 
     # Document root
-    root {{ item.root }};
+    root {{ chroot_root }};
     index index.html index.htm;
 
     location / {
@@ -33,7 +36,7 @@ server {
 
 {% if item.custom_config is defined %}
     # Custom configuration
-{{ item.custom_config | indent(4, first=True) }}
+{{ item.custom_config | trim | indent(4, first=True) }}
 {% endif %}
 }
 
@@ -52,12 +55,13 @@ server {
     listen [::]:80;
     server_name {{ item.server_names | join(' ') }};
 
-    # Logging
-    access_log /var/log/nginx/{{ item.name }}-access.log;
-    error_log /var/log/nginx/{{ item.name }}-error.log;
+    # Logging (real paths: nginx opens logs before chrooting)
+    access_log {{ nginx_log_dir }}/{{ item.name }}-access.log main;
+    error_log {{ nginx_log_dir }}/{{ item.name }}-error.log;
+
 
     # Document root
-    root {{ item.root }};
+    root {{ chroot_root }};
     index index.html index.htm;
 
     location / {
@@ -66,7 +70,7 @@ server {
 
 {% if item.custom_config is defined %}
     # Custom configuration
-{{ item.custom_config | indent(4, first=True) }}
+{{ item.custom_config | trim | indent(4, first=True) }}
 {% endif %}
 }
 {% endif %}

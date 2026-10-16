@@ -5,7 +5,8 @@ Automation scripts and configuration for managing my personal server infrastruct
 ## Servers Managed (for now)
 
 - Pi-hole DNS server (Raspberry Pi)
-- Web server running nginx (DigitalOcean VM)
+- Web server running nginx (OpenBSD VM)
+- Docker application host (Raspberry Pi 5, behind CGNAT via WireGuard) — *built, currently disabled*
 
 ## Repository Structure
 
@@ -175,12 +176,19 @@ ansible-vault view inventory/group_vars/all/vault.yml
 │   │   ├── site.yml     # Main playbook
 │   │   ├── common.yml   # Common tasks
 │   │   ├── pihole.yml   # Pi-hole tasks
+│   │   ├── apps.yml     # Docker app host tasks (disabled)
 │   │   ├── webserver.yml # Web server tasks
 │   │   ├── handlers.yml # Event handlers
 │   │   └── templates/   # Jinja2 templates
+│   │       ├── nginx.conf.j2             # Main nginx config
 │   │       ├── nginx-site.conf.j2        # Static site template
 │   │       ├── nginx-django-site.conf.j2 # Django site template
-│   │       └── supervisor-django.conf.j2 # Supervisor config
+│   │       ├── rc-django.j2              # rc.d service for Django apps
+│   │       ├── nginx-proxy-site.conf.j2  # Reverse-proxy site template
+│   │       ├── hostname.wg0.j2           # WireGuard hub (OpenBSD)
+│   │       ├── wg0.conf.j2               # WireGuard client (Linux)
+│   │       ├── linkding-compose.yml.j2   # linkding Docker Compose
+│   │       └── pf.conf.j2                # pf firewall ruleset
 │   ├── roles/           # Custom roles (if needed)
 │   └── files/           # Static files to copy
 └── README.md

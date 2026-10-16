@@ -1,0 +1,73 @@
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# OpenBSD pf(4) ruleset
+
+# Macros
+ext_if = "{{ pf_ext_if | default(ansible_facts['default_ipv4']['interface'] | default('egress')) }}"
+{% if not (cloudflare_only_web | default(false)) %}
+tcp_services = "{ {{ pf_allowed_tcp_ports | join(', ') }} }"
+{% endif %}
+{% if pf_allowed_udp_ports | default([]) | length > 0 %}
+udp_services = "{ {{ pf_allowed_udp_ports | join(', ') }} }"
+{% endif %}
+
+# Options
+set skip on lo
+set block-policy drop
+set loginterface egress
+
+# Normalization
+match in all scrub (no-df random-id max-mss 1440)
+
+# Tables must be declared before the rules that reference them
+# Hosts that brute-force SSH, populated by the overload rule below
+table <bruteforce> persist
+{% if cloudflare_only_web | default(false) %}
+
+# Cloudflare's published edge ranges, refreshed by cron. `file` is read at
+# ruleset load time, so pf fails loudly if the file is missing rather than
+# silently allowing nothing.
+table <cloudflare> persist file "{{ cloudflare_ip_file }}"
+{% endif %}
+
+# Default deny inbound, allow outbound
+block return log all
+block quick from <bruteforce>
+pass out quick inet
+{% if pf_allow_ipv6 | default(true) %}
+pass out quick inet6
+{% endif %}
+
+# SSH, rate limited
+pass in on $ext_if proto tcp to port {{ ssh_port }} \
+    keep state (max-src-conn 15, max-src-conn-rate 5/30, \
+                overload <bruteforce> flush global)
+
+# Permitted services
+{% if cloudflare_only_web | default(false) %}
+# Web ports are reachable only via Cloudflare. The origin certificate is a
+# Cloudflare Origin cert (not browser-trusted), so direct-to-origin traffic
+# has no legitimate use -- blocking it hides the origin from scanners and
+# stops anyone bypassing Cloudflare's WAF and rate limiting.
+# NOTE: this also blocks direct curl/browser access to the IP for debugging.
+pass in on $ext_if proto tcp from <cloudflare> to port { {{ cloudflare_web_ports | join(', ') }} }
+{% if pf_allowed_tcp_ports | difference(cloudflare_web_ports) | length > 0 %}
+pass in on $ext_if proto tcp to port { {{ pf_allowed_tcp_ports | difference(cloudflare_web_ports) | join(', ') }} }
+{% endif %}
+{% else %}
+pass in on $ext_if proto tcp to port $tcp_services
+{% endif %}
+{% if pf_allowed_udp_ports | default([]) | length > 0 %}
+pass in on $ext_if proto udp to port $udp_services
+{% endif %}
+
+# ICMP. unreach carries the fragmentation-needed code that path MTU
+# discovery depends on; timex is needed for traceroute to work.
+# Valid type names come from icmp(4) -- there is no "trunc" type.
+pass in inet proto icmp icmp-type { echoreq, unreach, timex }
+{% if pf_allow_ipv6 | default(true) %}
+pass in inet6 proto icmp6 all
+{% endif %}
+{% if pf_custom_rules is defined %}
+# Custom rules
+{{ pf_custom_rules }}
+{% endif %}

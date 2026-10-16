@@ -1,0 +1,16 @@
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# WireGuard client: dials out to caesar. Outbound-only, so CGNAT is not an
+# obstacle; PersistentKeepalive holds the NAT mapping open so caesar can
+# reach back at any time.
+[Interface]
+PrivateKey = {{ vault_wg_pi_apps_private_key }}
+Address = {{ wg_pi_apps_ip }}/24
+MTU = {{ wg_mtu }}
+
+[Peer]
+PublicKey = {{ vault_wg_caesar_public_key }}
+Endpoint = {{ wg_endpoint_host }}:{{ wg_port }}
+# Route only the tunnel subnet -- this is NOT a default-route VPN, so the Pi's
+# normal traffic and Pi-hole DNS are unaffected.
+AllowedIPs = {{ wg_subnet }}
+PersistentKeepalive = 25

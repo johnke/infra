@@ -1,0 +1,154 @@
+---
+# Application host configuration (Raspberry Pi, Debian)
+#
+# Runs Docker applications that caesar publishes over the WireGuard tunnel.
+# This host sits behind CGNAT and is never reachable from the internet; it
+# dials out to caesar and keeps the tunnel alive.
+#
+# DISABLED: gated on apps_enabled, which is false in group_vars/apps/vars.yml.
+# The apps group is also empty in inventory/hosts, so this file is inert on
+# both counts. See that vars file for how to re-enable.
+
+- name: Application host setup is disabled
+  ansible.builtin.debug:
+    msg: >-
+      apps_enabled is false; skipping WireGuard, Docker and linkding setup.
+      See inventory/group_vars/apps/vars.yml to re-enable.
+  when: not (apps_enabled | default(false) | bool)
+
+- name: Configure application host
+  when: apps_enabled | default(false) | bool
+  block:
+    # --- WireGuard ---------------------------------------------------------------
+
+    - name: Install WireGuard
+      ansible.builtin.apt:
+        name: wireguard
+        state: present
+        update_cache: true
+
+    - name: Deploy WireGuard configuration
+      ansible.builtin.template:
+        src: wg0.conf.j2
+        dest: "/etc/wireguard/{{ wg_interface }}.conf"
+        owner: root
+        group: root
+        mode: '0600'
+      notify: restart wireguard
+
+    - name: Enable and start WireGuard
+      ansible.builtin.service:
+        name: "wg-quick@{{ wg_interface }}"
+        state: started
+        enabled: true
+
+    # --- Docker ------------------------------------------------------------------
+
+    - name: Create Docker systemd override directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/docker.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install Docker prerequisites
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+
+    - name: Create apt keyring directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Add Docker GPG key
+      ansible.builtin.get_url:
+        url: "https://download.docker.com/linux/debian/gpg"
+        dest: /etc/apt/keyrings/docker.asc
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Add Docker repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch={{ ansible_facts['architecture'] | replace('aarch64', 'arm64') }}
+          signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/debian
+          {{ ansible_facts['distribution_release'] }} stable
+        filename: docker
+        state: present
+
+    - name: Install Docker
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Ensure Docker is started and enabled
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    # linkding binds to the tunnel address, which does not exist until wg0 is up.
+    # Without this, Docker loses the race on boot and the container fails to bind.
+    - name: Order Docker after the WireGuard interface
+      ansible.builtin.copy:
+        content: |
+          # Managed by Ansible - DO NOT EDIT MANUALLY
+          [Unit]
+          After=wg-quick@{{ wg_interface }}.service
+          Wants=wg-quick@{{ wg_interface }}.service
+        dest: /etc/systemd/system/docker.service.d/override.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Add user to docker group
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+    # --- linkding ----------------------------------------------------------------
+
+    - name: Create linkding directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+      loop:
+        - "{{ linkding_compose_dir }}"
+        - "{{ linkding_data_dir }}"
+      when: linkding_enabled | bool
+
+    - name: Deploy linkding compose file
+      ansible.builtin.template:
+        src: linkding-compose.yml.j2
+        dest: "{{ linkding_compose_dir }}/docker-compose.yml"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'  # contains the superuser password
+      when: linkding_enabled | bool
+
+    - name: Start linkding
+      community.docker.docker_compose_v2:
+        project_src: "{{ linkding_compose_dir }}"
+        state: present
+        pull: missing
+      when: linkding_enabled | bool

@@ -1,0 +1,23 @@
+# Managed by Ansible - DO NOT EDIT MANUALLY
+services:
+  linkding:
+    image: {{ linkding_image }}
+    container_name: linkding
+    restart: unless-stopped
+    # Published on the tunnel address only. caesar reaches this over wg0;
+    # it is not listening on the LAN or on any public interface.
+    ports:
+      - "{{ wg_pi_apps_ip }}:{{ linkding_port }}:9090"
+    volumes:
+      - "{{ linkding_data_dir }}:/etc/linkding/data"
+    environment:
+      LD_SUPERUSER_NAME: "{{ linkding_superuser_name }}"
+      LD_SUPERUSER_PASSWORD: "{{ linkding_superuser_password }}"
+      # nginx on caesar terminates TLS and forwards the original scheme/host.
+      LD_CSRF_TRUSTED_ORIGINS: "{{ linkding_url_base }}"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

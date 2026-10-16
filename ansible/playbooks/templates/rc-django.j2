@@ -1,0 +1,23 @@
+#!/bin/ksh
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# rc.d(8) service for {{ item.name }} (Django + Gunicorn)
+
+daemon="{{ item.root }}/venv/bin/gunicorn"
+daemon_flags="{{ item.wsgi_module | default('config.wsgi:application') }} --bind 127.0.0.1:{{ item.gunicorn_port | default(8000) }} --workers {{ item.gunicorn_workers | default(3) }} --access-logfile {{ item.root }}/logs/access.log --error-logfile {{ item.root }}/logs/error.log"
+daemon_user="{{ item.user | default(web_user) }}"
+daemon_execdir="{{ item.root }}"
+
+. /etc/rc.d/rc.subr
+
+rc_bg=YES
+rc_reload=NO
+
+{% if item.rc_environment is defined %}
+rc_pre() {
+{% for key, value in item.rc_environment.items() %}
+    export {{ key }}="{{ value }}"
+{% endfor %}
+}
+
+{% endif %}
+rc_cmd $1

@@ -1,0 +1,10 @@
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# WireGuard hub interface. Peers dial in from behind CGNAT, so no peer
+# endpoint is configured here -- wg(4) learns each peer's current address
+# from the authenticated handshake.
+wgkey {{ vault_wg_caesar_private_key }}
+wgport {{ wg_port }}
+wgpeer {{ vault_wg_pi_apps_public_key }} wgaip {{ wg_pi_apps_ip }}/32
+inet {{ wg_caesar_ip }} 255.255.255.0
+mtu {{ wg_mtu }}
+up

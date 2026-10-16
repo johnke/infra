@@ -1,15 +1,29 @@
-# Web server specific variables
+# Web server specific variables (OpenBSD)
 
-# Certbot settings
-certbot_email: "{{ vault_certbot_email }}"
-certbot_create_if_missing: false  # Set to true to automatically request new certs
+# TLS certificates
+# Managed outside Ansible: johnke.me uses a Cloudflare Origin Certificate
+# (valid to 2041, covers johnke.me + *.johnke.me). Install by hand on the
+# host -- the playbook only verifies the files exist. See CLAUDE.md.
 
 # Base directories
-web_root_base: /var/www
-docker_apps_base: /opt/docker
+# nginx on OpenBSD is chrooted to /var/www, so document roots live beneath it
+# and are referenced in configs WITHOUT the /var/www prefix.
+chroot_base: /var/www
+web_root_base: /var/www/htdocs
+
+# Log directory, referenced by REAL path (not chroot-relative): nginx opens
+# its log files as root before chrooting, so absolute host paths work for the
+# daemon and, unlike /logs/..., also resolve under `nginx -t` (which runs
+# outside the chroot). Document roots are different -- those ARE
+# chroot-relative, because they are resolved after the chroot.
+nginx_log_dir: /var/www/logs
+
+# OpenBSD's web user/group (equivalent of www-data on Debian)
+web_user: www
+web_group: www
 
 # Nginx sites configuration
-# Each site will create a config in sites-available and symlink to sites-enabled
+# Each site gets one config file in /etc/nginx/conf.d/, included by nginx.conf
 nginx_sites:
   - name: johnke.me
     server_names:
@@ -19,12 +33,13 @@ nginx_sites:
       - www.johnke.wtf
     root: "{{ web_root_base }}/johnke.me"
     ssl_enabled: true
-    ssl_certificate: /etc/letsencrypt/live/johnke.me-0001/fullchain.pem
-    ssl_certificate_key: /etc/letsencrypt/live/johnke.me-0001/privkey.pem
+    ssl_certificate: /etc/ssl/johnke.me.fullchain.pem
+    ssl_certificate_key: /etc/ssl/private/johnke.me.key
     # Custom config snippets (optional)
     custom_config: |
       rewrite ^/feed$  /index.xml permanent;
       rewrite ^/feed/$ /index.xml permanent;
+
   - name: kathleenkelleher.com
     server_names:
       - kathleenkelleher.com
@@ -32,34 +47,75 @@ nginx_sites:
     root: "{{ web_root_base }}/kathleenkelleher.com/kathleenkelleher.com"
     ssl_enabled: false
 
-  # Django site with Gunicorn + Supervisor
-  - name: goty.club
-    site_type: django
-    server_names:
-      - goty.club
-      - www.goty.club
-    root: "{{ web_root_base }}/goty.club"
-    ssl_enabled: true
-    use_certbot_ssl_config: true  # Use Certbot's SSL config instead of custom
-    ssl_certificate: /etc/letsencrypt/live/goty.club/fullchain.pem
-    ssl_certificate_key: /etc/letsencrypt/live/goty.club/privkey.pem
-    gunicorn_port: 8000
-    wsgi_module: config.wsgi:application
-    client_max_body_size: 10M
-    # supervisor_environment:
-    #   DJANGO_SETTINGS_MODULE: config.settings.production
+  # DISABLED 2026-10-08
+  # # Django site with Gunicorn, supervised by rc.d(8)/rcctl
+  # - name: goty.club
+  #   site_type: django
+  #   server_names:
+  #     - goty.club
+  #     - www.goty.club
+  #   root: "{{ web_root_base }}/goty.club"
+  #   ssl_enabled: true
+  #   ssl_certificate: /etc/ssl/goty.club.fullchain.pem
+  #   ssl_certificate_key: /etc/ssl/private/goty.club.key
+  #   acme_domains:
+  #     - goty.club
+  #     - www.goty.club
+  #   gunicorn_port: 8000
+  #   wsgi_module: config.wsgi:application
+  #   client_max_body_size: 10M
+  #   # rc.d service name; must be a valid rc script name (no dots)
+  #   service_name: goty_club
+  #   # rc_environment:
+  #   #   DJANGO_SETTINGS_MODULE: config.settings.production
 
-  # Docker application with reverse proxy
-  - name: bookmarks.johnke.me
-    site_type: docker
-    server_names:
-      - bookmarks.johnke.me
-    ssl_enabled: true
-    ssl_certificate: /etc/letsencrypt/live/johnke.me-0001/fullchain.pem
-    ssl_certificate_key: /etc/letsencrypt/live/johnke.me-0001/privkey.pem
-    proxy_port: 9090  # Port Docker container listens on
-    client_max_body_size: 50M
-    # Docker Compose configuration
-    docker_compose_dir: "{{ docker_apps_base }}/bookmarks"
-    # docker_compose_template: bookmarks-compose.yml.j2  # Optional: use template instead of static file
-    # docker_compose_file: bookmarks-compose.yml  # Optional: deploy from files/ directory
+  # DISABLED 2026-10-08: linkding on pi-apps is parked until we revisit it.
+  # Re-enable by uncommenting this block, setting wg_enabled: true below, and
+  # restoring the apps host in inventory/hosts. See CLAUDE.md for the tunnel
+  # design. Serving this would 502 until the tunnel and the Pi are back.
+  #
+  # Reverse proxy to linkding, which runs in Docker on pi-apps at home and is
+  # reachable only across the WireGuard tunnel. Docker does not run on
+  # OpenBSD, which is why this app lives on the Pi rather than here.
+  #
+  # - name: bookmarks.johnke.me
+  #   site_type: proxy
+  #   server_names:
+  #     - bookmarks.johnke.me
+  #   ssl_enabled: true
+  #   ssl_certificate: /etc/ssl/bookmarks.johnke.me.fullchain.pem
+  #   ssl_certificate_key: /etc/ssl/private/bookmarks.johnke.me.key
+  #   acme_domains:
+  #     - bookmarks.johnke.me
+  #   proxy_host: "{{ wg_pi_apps_ip }}"
+  #   proxy_port: "{{ linkding_port | default(9090) }}"
+  #   client_max_body_size: 50M
+  #   proxy_custom_error_page: true
+  #   proxy_connect_timeout: 5s
+
+# Firewall: open the web ports on top of the defaults in group_vars/all
+pf_allowed_tcp_ports:
+  - 80
+  - 443
+
+# Restrict 80/443 to Cloudflare's edge ranges only (origin protection).
+# johnke.me is proxied and uses a Cloudflare Origin certificate, which is not
+# browser-trusted, so direct-to-origin web traffic has no legitimate use.
+#
+# TRADE-OFF: this blocks direct access to 46.23.90.156 for debugging, and any
+# domain you grey-cloud stops working until the proxy is back on. SSH is
+# unaffected (it has its own rule and must never go through Cloudflare).
+cloudflare_only_web: true
+cloudflare_web_ports:
+  - 80
+  - 443
+cloudflare_ip_file: /etc/pf.cloudflare
+nginx_cloudflare_snippet: /etc/nginx/cloudflare-real-ip.conf
+# Refresh cadence for the published ranges. They change rarely but do change.
+cloudflare_ip_refresh: weekly
+
+# No WireGuard peers while the tunnel is disabled, so 51820/udp stays closed.
+pf_allowed_udp_ports: []
+
+# WireGuard hub interface on caesar. Disabled along with the linkding site.
+wg_enabled: false

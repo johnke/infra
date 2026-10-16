@@ -1,206 +1,371 @@
 ---
-# Web server configuration
+# Web server configuration (OpenBSD)
+#
+# Notes on OpenBSD specifics:
+#   * nginx comes from packages and runs chrooted in /var/www, so document
+#     roots are referenced in nginx.conf WITHOUT the /var/www prefix.
+#   * Site configs go in /etc/nginx/conf.d/ (no sites-available/enabled).
+#   * TLS certificates are managed manually (Cloudflare Origin certs).
+#   * Python apps are supervised by rc.d(8)/rcctl, not supervisor.
 
-- name: Install nginx, certbot, supervisor, and Docker dependencies
-  ansible.builtin.apt:
+- name: Install nginx, Python and deploy tooling
+  community.general.openbsd_pkg:
     name:
       - nginx
-      - certbot
-      - python3-certbot-nginx
-      - supervisor
-      - ca-certificates
-      - curl
-      - gnupg
-    state: present
-    update_cache: yes
-
-- name: Add Docker GPG key
-  ansible.builtin.apt_key:
-    url: https://download.docker.com/linux/ubuntu/gpg
+      - "{{ openbsd_python_pkg }}"
+      # rsync is not in base; CI deploys site content over SSH with it
+      - "{{ openbsd_rsync_pkg }}"
     state: present
 
-- name: Add Docker repository
-  ansible.builtin.apt_repository:
-    repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
-    state: present
+# --- Document roots ----------------------------------------------------------
 
-- name: Install Docker
-  ansible.builtin.apt:
-    name:
-      - docker-ce
-      - docker-ce-cli
-      - containerd.io
-      - docker-compose-plugin
-    state: present
-    update_cache: yes
+# nginx is chrooted to /var/www, so its logs must live inside the chroot.
+- name: Create nginx log directory
+  ansible.builtin.file:
+    path: "{{ nginx_log_dir }}"
+    state: directory
+    owner: "{{ web_user }}"
+    group: "{{ web_group }}"
+    mode: '0755'
 
-- name: Ensure Docker service is started and enabled
-  ansible.builtin.service:
-    name: docker
-    state: started
-    enabled: yes
-
-- name: Add user to docker group
+# The deploy user shares the www group so nginx can read deployed content
+# through group permissions.
+- name: Add the deploy user to the web group
   ansible.builtin.user:
-    name: "{{ ansible_user }}"
-    groups: docker
-    append: yes
+    name: "{{ deploy_user | default(ansible_user) }}"
+    groups: "{{ web_group }}"
+    append: true
 
-- name: Allow HTTP through UFW
-  community.general.ufw:
-    rule: allow
-    port: "80"
-    proto: tcp
-
-- name: Allow HTTPS through UFW
-  community.general.ufw:
-    rule: allow
-    port: "443"
-    proto: tcp
-
-- name: Ensure SSL dhparam file exists
-  ansible.builtin.command:
-    cmd: openssl dhparam -out /etc/ssl/certs/dhparam.pem 2048
-    creates: /etc/ssl/certs/dhparam.pem
-  when: nginx_sites | selectattr('ssl_enabled', 'defined') | selectattr('ssl_enabled') | list | length > 0
-
+# Web roots are owned by the DEPLOY user, with the web server's group having
+# read access only. nginx never writes here, so it does not need ownership --
+# and making www the owner meant CI (running as the deploy user) could not
+# chmod the directories it was rsyncing into: on BSD, setting a directory's
+# setgid bit requires ownership, not just group membership, so
+# `rsync --chmod=D2775` failed with EPERM on every www-owned directory.
 - name: Create web root directories
   ansible.builtin.file:
     path: "{{ item.root }}"
     state: directory
-    owner: www-data
-    group: www-data
-    mode: '0775'  # Group writable for deployments
+    owner: "{{ deploy_user | default(ansible_user) }}"
+    group: "{{ web_group }}"
+    mode: '0755'
   loop: "{{ nginx_sites }}"
-  when: nginx_sites is defined and nginx_sites | length > 0
+  when:
+    - nginx_sites is defined
+    - item.root is defined
+
+# --- TLS ---------------------------------------------------------------------
+# Certificates are managed outside Ansible (Cloudflare Origin certificates,
+# installed by hand on the host). The playbook never writes or renews them --
+# it only checks they exist, because nginx refuses to start when a configured
+# certificate file is missing.
+#
+# To install one: see CLAUDE.md "Certificates".
+
+- name: Check for existing certificates
+  ansible.builtin.stat:
+    path: "{{ item.ssl_certificate }}"
+  loop: "{{ nginx_sites }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: cert_stat
+  when: item.ssl_enabled | default(false)
+
+# Sites whose certificate is present get an HTTPS config; the rest are served
+# HTTP-only so that a missing certificate cannot stop nginx from starting.
+- name: Record which sites have certificates
+  ansible.builtin.set_fact:
+    sites_with_certs: >-
+      {{ cert_stat.results
+         | rejectattr('skipped', 'defined')
+         | selectattr('stat.exists')
+         | map(attribute='item.name') | list }}
+
+- name: Report sites awaiting a certificate
+  ansible.builtin.debug:
+    msg: >-
+      No certificate at {{ item.ssl_certificate }} for {{ item.name }};
+      serving HTTP-only. Install the certificate and re-run to enable HTTPS.
+  loop: "{{ nginx_sites }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - item.ssl_enabled | default(false)
+    - item.name not in (sites_with_certs | default([]))
+
+- name: Generate DH parameters
+  ansible.builtin.command:
+    cmd: openssl dhparam -out /etc/ssl/dhparam.pem 2048
+    creates: /etc/ssl/dhparam.pem
+  when: nginx_sites | selectattr('ssl_enabled', 'defined') | selectattr('ssl_enabled') | list | length > 0
+
+# --- Cloudflare origin protection --------------------------------------------
+# Both the pf <cloudflare> table and nginx's real_ip snippet are generated from
+# Cloudflare's published ranges. They must exist BEFORE their consumers load:
+# pf reads the table file at ruleset-load time, and nginx.conf includes the
+# snippet, so a missing file stops nginx from starting.
+
+- name: Install the Cloudflare IP refresh script
+  ansible.builtin.template:
+    src: update-cloudflare-ips.sh.j2
+    dest: /usr/local/sbin/update-cloudflare-ips
+    owner: root
+    group: wheel
+    mode: '0750'
+  when: cloudflare_only_web | default(false)
+
+# Both generated files must be present and non-empty before their consumers
+# load: pf reads the table file at ruleset-load time, and nginx.conf includes
+# the snippet, so nginx -t fails outright if it is missing. common.yml lays
+# down an EMPTY placeholder for the pf file so the ruleset can load on a fresh
+# host, which means existence alone is not enough -- check the size too.
+- name: Check the generated Cloudflare files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ cloudflare_ip_file }}"
+    - "{{ nginx_cloudflare_snippet }}"
+  register: cf_files
+  when: cloudflare_only_web | default(false)
+
+- name: Populate Cloudflare IP data when either file is missing or empty
+  ansible.builtin.command:
+    cmd: /usr/local/sbin/update-cloudflare-ips
+  register: cf_populate
+  changed_when: cf_populate.rc == 0
+  when:
+    - cloudflare_only_web | default(false)
+    - cf_files.results
+      | rejectattr('skipped', 'defined')
+      | map(attribute='stat')
+      | selectattr('size', 'defined')
+      | selectattr('size', 'gt', 0)
+      | list | length < 2
+
+- name: Schedule Cloudflare IP refresh
+  ansible.builtin.cron:
+    name: update-cloudflare-ips
+    special_time: "{{ cloudflare_ip_refresh }}"
+    job: /usr/local/sbin/update-cloudflare-ips
+    user: root
+  when: cloudflare_only_web | default(false)
+
+# --- WireGuard hub -----------------------------------------------------------
+# wg(4) is in base; the interface is configured as /etc/hostname.wg0 and
+# brought up with netstart. Peers dial in from behind CGNAT.
+
+- name: Deploy WireGuard hub interface configuration
+  ansible.builtin.template:
+    src: hostname.wg0.j2
+    dest: "/etc/hostname.{{ wg_interface }}"
+    owner: root
+    group: wheel
+    mode: '0640'
+  notify: restart wireguard interface
+  when: wg_enabled | default(false)
+
+- name: Check whether the WireGuard interface is up
+  ansible.builtin.command:
+    cmd: "ifconfig {{ wg_interface }}"
+  register: wg_ifconfig
+  changed_when: false
+  failed_when: false
+  when: wg_enabled | default(false)
+
+- name: Bring up the WireGuard interface
+  ansible.builtin.command:
+    cmd: "sh /etc/netstart {{ wg_interface }}"
+  when:
+    - wg_enabled | default(false)
+    - wg_ifconfig.rc != 0 or wg_caesar_ip not in (wg_ifconfig.stdout | default(''))
+
+# --- nginx configuration -----------------------------------------------------
+
+- name: Create nginx conf.d directory
+  ansible.builtin.file:
+    path: /etc/nginx/conf.d
+    state: directory
+    owner: root
+    group: wheel
+    mode: '0755'
+
+- name: Deploy main nginx configuration
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: wheel
+    mode: '0644'
+  notify: reload nginx
 
 - name: Deploy static nginx site configurations
   ansible.builtin.template:
     src: nginx-site.conf.j2
-    dest: "/etc/nginx/sites-available/{{ item.name }}"
+    dest: "/etc/nginx/conf.d/{{ item.name }}.conf"
     owner: root
-    group: root
+    group: wheel
     mode: '0644'
   loop: "{{ nginx_sites }}"
   notify: reload nginx
-  when: nginx_sites is defined and nginx_sites | length > 0 and (item.site_type | default('static')) == 'static'
+  when:
+    - nginx_sites is defined
+    - (item.site_type | default('static')) == 'static'
 
 - name: Deploy Django nginx site configurations
   ansible.builtin.template:
     src: nginx-django-site.conf.j2
-    dest: "/etc/nginx/sites-available/{{ item.name }}"
+    dest: "/etc/nginx/conf.d/{{ item.name }}.conf"
     owner: root
-    group: root
+    group: wheel
     mode: '0644'
   loop: "{{ nginx_sites }}"
   notify: reload nginx
-  when: nginx_sites is defined and nginx_sites | length > 0 and item.site_type is defined and item.site_type == 'django'
+  when:
+    - nginx_sites is defined
+    - item.site_type | default('static') == 'django'
 
-- name: Deploy Docker nginx site configurations
+- name: Deploy reverse-proxy nginx site configurations
   ansible.builtin.template:
-    src: nginx-docker-site.conf.j2
-    dest: "/etc/nginx/sites-available/{{ item.name }}"
+    src: nginx-proxy-site.conf.j2
+    dest: "/etc/nginx/conf.d/{{ item.name }}.conf"
     owner: root
-    group: root
+    group: wheel
     mode: '0644'
   loop: "{{ nginx_sites }}"
   notify: reload nginx
-  when: nginx_sites is defined and nginx_sites | length > 0 and item.site_type is defined and item.site_type == 'docker'
+  when:
+    - nginx_sites is defined
+    - item.site_type | default('static') == 'proxy'
 
-- name: Enable nginx sites
-  ansible.builtin.file:
-    src: "/etc/nginx/sites-available/{{ item.name }}"
-    dest: "/etc/nginx/sites-enabled/{{ item.name }}"
-    state: link
-  loop: "{{ nginx_sites }}"
-  notify: reload nginx
-  when: nginx_sites is defined and nginx_sites | length > 0
+- name: Validate nginx configuration
+  ansible.builtin.command:
+    cmd: nginx -t
+  changed_when: false
 
 - name: Ensure nginx is started and enabled
   ansible.builtin.service:
     name: nginx
     state: started
-    enabled: yes
+    enabled: true
 
-- name: Set up certbot renewal timer
-  ansible.builtin.systemd:
-    name: certbot.timer
-    enabled: yes
-    state: started
+# --- TLS second pass ---------------------------------------------------------
+# Sites whose certificate was missing above were deployed HTTP-only so nginx
+# could start. Install the certificate by hand, then re-run the playbook: this
+# pass picks it up and deploys the HTTPS config.
 
-# Django-specific tasks
+- name: Deploy static nginx site configurations with TLS
+  ansible.builtin.template:
+    src: nginx-site.conf.j2
+    dest: "/etc/nginx/conf.d/{{ item.name }}.conf"
+    owner: root
+    group: wheel
+    mode: '0644'
+  loop: "{{ nginx_sites }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: reload nginx
+  when:
+    - (item.site_type | default('static')) == 'static'
+    - item.ssl_enabled | default(false)
+    - item.name in (sites_with_certs | default([]))
+
+- name: Deploy Django nginx site configurations with TLS
+  ansible.builtin.template:
+    src: nginx-django-site.conf.j2
+    dest: "/etc/nginx/conf.d/{{ item.name }}.conf"
+    owner: root
+    group: wheel
+    mode: '0644'
+  loop: "{{ nginx_sites }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: reload nginx
+  when:
+    - item.site_type | default('static') == 'django'
+    - item.ssl_enabled | default(false)
+    - item.name in (sites_with_certs | default([]))
+
+- name: Deploy reverse-proxy nginx site configurations with TLS
+  ansible.builtin.template:
+    src: nginx-proxy-site.conf.j2
+    dest: "/etc/nginx/conf.d/{{ item.name }}.conf"
+    owner: root
+    group: wheel
+    mode: '0644'
+  loop: "{{ nginx_sites }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: reload nginx
+  when:
+    - item.site_type | default('static') == 'proxy'
+    - item.ssl_enabled | default(false)
+    - item.name in (sites_with_certs | default([]))
+
+- name: Validate nginx configuration after TLS deployment
+  ansible.builtin.command:
+    cmd: nginx -t
+  changed_when: false
+
+# Handlers normally run at the very end of the play, so a failure in a later
+# task would leave nginx running the HTTP-only config even though the HTTPS
+# one is on disk. Flush them here so the reload happens as soon as the config
+# is known good.
+- name: Apply pending nginx reloads
+  ansible.builtin.meta: flush_handlers
+
+# A reload makes nginx re-read its config, but a worker that was started
+# without any 443 server block does not always pick up a newly added listen
+# directive. Verify the socket is actually bound and restart if it is not.
+- name: Check whether nginx is listening on the TLS port
+  ansible.builtin.wait_for:
+    port: 443
+    host: 127.0.0.1
+    timeout: 3
+  register: tls_listening
+  failed_when: false
+  changed_when: false
+  when: sites_with_certs | default([]) | length > 0
+
+- name: Restart nginx to bind the TLS port
+  ansible.builtin.service:
+    name: nginx
+    state: restarted
+  when:
+    - sites_with_certs | default([]) | length > 0
+    - tls_listening.failed | default(false)
+
+# --- Django apps: rc.d(8) services -------------------------------------------
+
 - name: Create Django app log directories
   ansible.builtin.file:
     path: "{{ item.root }}/logs"
     state: directory
-    owner: www-data
-    group: www-data
+    owner: "{{ web_user }}"
+    group: "{{ web_group }}"
     mode: '0775'  # Group writable for deployments
   loop: "{{ nginx_sites }}"
-  when: nginx_sites is defined and item.site_type is defined and item.site_type == 'django'
+  when:
+    - nginx_sites is defined
+    - item.site_type | default('static') == 'django'
 
-- name: Deploy supervisor configurations for Django apps
+- name: Deploy rc.d scripts for Django apps
   ansible.builtin.template:
-    src: supervisor-django.conf.j2
-    dest: "/etc/supervisor/conf.d/{{ item.name }}.conf"
+    src: rc-django.j2
+    dest: "/etc/rc.d/{{ item.service_name }}"
     owner: root
-    group: root
-    mode: '0644'
-  loop: "{{ nginx_sites }}"
-  notify: restart supervisor
-  when: nginx_sites is defined and item.site_type is defined and item.site_type == 'django'
-
-- name: Ensure supervisor is started and enabled
-  ansible.builtin.service:
-    name: supervisor
-    state: started
-    enabled: yes
-  when: nginx_sites | selectattr('site_type', 'defined') | selectattr('site_type', 'equalto', 'django') | list | length > 0
-
-# Docker-specific tasks
-- name: Create Docker app directories
-  ansible.builtin.file:
-    path: "{{ item.docker_compose_dir }}"
-    state: directory
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
+    group: wheel
     mode: '0755'
   loop: "{{ nginx_sites }}"
-  when: nginx_sites is defined and item.site_type is defined and item.site_type == 'docker' and item.docker_compose_dir is defined
+  when:
+    - nginx_sites is defined
+    - item.site_type | default('static') == 'django'
 
-- name: Deploy Docker Compose files from templates
-  ansible.builtin.template:
-    src: "{{ item.docker_compose_template }}"
-    dest: "{{ item.docker_compose_dir }}/docker-compose.yml"
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
-    mode: '0644'
+- name: Enable and start Django app services
+  ansible.builtin.service:
+    name: "{{ item.service_name }}"
+    state: started
+    enabled: true
   loop: "{{ nginx_sites }}"
-  when: nginx_sites is defined and item.site_type is defined and item.site_type == 'docker' and item.docker_compose_template is defined
-
-- name: Deploy Docker Compose files from static files
-  ansible.builtin.copy:
-    src: "{{ item.docker_compose_file }}"
-    dest: "{{ item.docker_compose_dir }}/docker-compose.yml"
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
-    mode: '0644'
-  loop: "{{ nginx_sites }}"
-  when: nginx_sites is defined and item.site_type is defined and item.site_type == 'docker' and item.docker_compose_file is defined
-
-- name: Deploy .env files for Docker apps
-  ansible.builtin.template:
-    src: "{{ item.docker_env_template }}"
-    dest: "{{ item.docker_compose_dir }}/.env"
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
-    mode: '0600'
-  loop: "{{ nginx_sites }}"
-  when: nginx_sites is defined and item.site_type is defined and item.site_type == 'docker' and item.docker_env_template is defined
-
-- name: Start Docker Compose services
-  community.docker.docker_compose_v2:
-    project_src: "{{ item.docker_compose_dir }}"
-    state: present
-  loop: "{{ nginx_sites }}"
-  when: nginx_sites is defined and item.site_type is defined and item.site_type == 'docker' and item.docker_compose_dir is defined and (item.docker_compose_template is defined or item.docker_compose_file is defined)
+  when:
+    - nginx_sites is defined
+    - item.site_type | default('static') == 'django'

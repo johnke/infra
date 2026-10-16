@@ -16,15 +16,24 @@
     name: pihole-FTL
     state: restarted
 
-- name: restart supervisor
+- name: reload pf
+  ansible.builtin.command:
+    cmd: pfctl -f /etc/pf.conf
+
+- name: restart ntpd
   ansible.builtin.service:
-    name: supervisor
+    name: ntpd
     state: restarted
 
-- name: reread supervisor
+- name: restart wireguard interface
   ansible.builtin.command:
-    cmd: supervisorctl reread
+    cmd: "sh /etc/netstart {{ wg_interface }}"
 
-- name: update supervisor
-  ansible.builtin.command:
-    cmd: supervisorctl update
+- name: restart wireguard
+  ansible.builtin.service:
+    name: "wg-quick@{{ wg_interface }}"
+    state: restarted
+
+- name: reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
